@@ -1,0 +1,360 @@
+library("edgeR") 
+library(BioNERO)
+
+laneInfo_my<-read.csv("")
+counts = readDGE(laneInfo_my$SID)$counts
+
+cpms = cpm(counts) 
+keep = rowSums(cpms>1) >= 51 # at least 1 read in %90 samples
+counts = counts[keep,]
+summary(keep)
+
+library("DESeq2")
+condition <- as.character(laneInfo_my$Sex)
+expt_design <- data.frame(row.names =colnames(counts), condition = c(condition))
+dds<- DESeqDataSetFromMatrix(countData=counts, colData=expt_design, design=~condition)
+counts(dds)
+rlogCOUNTS<-rlog(dds,blind=TRUE) #use blind=TRUE to not account for experimental design
+head(assay(rlogCOUNTS))
+rologcount<-as.data.frame(assay(rlogCOUNTS))
+boxplot(rologcount, las=2)
+write.csv(rologcount, file="rologcount.csv", quote=FALSE, row.names =T)
+rologcount <- read.csv(file="rologcount.csv",header =T,row.names = 1)
+
+
+laneInfo_mynew<-laneInfo_my[laneInfo_my$SID %in% colnames(rologcount),]
+
+laneInfo_my1<-laneInfo_mynew[laneInfo_mynew$Tissue=="Liver",]
+#laneInfo_my1 = laneInfo_my1[-c(1:6),];
+counts_Liver = rologcount[,laneInfo_my1$SID]
+
+laneInfo_my2<-laneInfo_mynew[laneInfo_mynew$Tissue=="Lung",]
+#laneInfo_my2 = laneInfo_my2[-c(1:6),];
+counts_Lung = rologcount[,laneInfo_my2$SID]
+
+laneInfo_my3<-laneInfo_mynew[laneInfo_mynew$Tissue=="Spleen",]
+#laneInfo_my3 = laneInfo_my3[-c(1:6),];
+counts_Spleen = rologcount[,laneInfo_my3$SID]
+
+
+#########prepare input data
+
+library(WGCNA);
+
+# The following setting is important, do not omit.
+
+options(stringsAsFactors = FALSE);
+
+# We work with two sets:
+nSets = 3;
+# For easier labeling of plots, create a vector holding descriptive names of the two sets.
+setLabels = c("Liver","Lung","Spleen")
+shortLabels = c("Liver","Lung","Spleen")
+
+# Form multi-set expression data: columns starting from 9 contain actual expression data. 
+multiExpr = vector(mode = "list", length = nSets)
+
+multiExpr[[1]] = list(data = as.data.frame(t(counts_Liver))); 
+names(multiExpr[[1]]$data) = row.names(counts_Liver); 
+rownames(multiExpr[[1]]$data) = colnames(counts_Liver);
+
+multiExpr[[2]] = list(data = as.data.frame(t(counts_Lung))); 
+names(multiExpr[[2]]$data) = row.names(counts_Lung); 
+rownames(multiExpr[[2]]$data) = colnames(counts_Lung);
+
+multiExpr[[3]] = list(data = as.data.frame(t(counts_Spleen))); 
+names(multiExpr[[3]]$data) = row.names(counts_Spleen); 
+rownames(multiExpr[[3]]$data) = colnames(counts_Spleen);
+
+
+
+# Check that the data has the correct format for many functions operating on multiple sets:
+exprSize = checkSets(multiExpr)
+exprSize 
+
+#Read in the female liver data set
+
+gsg = goodSamplesGenesMS(multiExpr, verbose = 3);
+gsg$allOK
+
+
+if (!gsg$allOK)
+{
+  # Print information about the removed genes:
+  if (sum(!gsg$goodGenes) > 0)
+    printFlush(paste("Removing genes:", paste(names(multiExpr[[1]]$data)[!gsg$goodGenes],collapse = ", ")))
+     for (set in 1:exprSize$nSets)
+{
+if (sum(!gsg$goodSamples[[set]]))
+     printFlush(paste("In set", setLabels[set], "removing samples",
+                     paste(rownames(multiExpr[[set]]$data)[!gsg$goodSamples[[set]]], collapse = ", ")))
+    # Remove the offending genes and samples
+    multiExpr[[set]]$data = multiExpr[[set]]$data[gsg$goodSamples[[set]], gsg$goodGenes];
+  }
+  # Update exprSize
+  exprSize = checkSets(multiExpr)
+}
+
+
+##########sampleTree
+sampleTrees = list()
+for (set in 1:nSets)
+{
+  sampleTrees[[set]] = hclust(dist(multiExpr[[set]]$data), method = "average")
+}
+
+pdf(file = "Plots/SampleClustering.pdf", width = 12, height = 12); par(mfrow=c(2,1))
+par(mar = c(0, 4, 2, 0))
+for (set in 1:nSets)
+plot(sampleTrees[[set]], main = paste("Sample clustering on all genes in", setLabels[set]), xlab="", sub="", cex = 0.7);
+dev.off();
+
+
+##########to remove outgroups by cutting tree
+
+# Adjust the cut height for the male data set for the number of samples
+cutHeights = c(100,45,60);
+# Re-plot the dendrograms including the cut lines
+pdf(file = "Plots/SampleClustering.pdf", width = 12, height = 12); par(mfrow=c(2,1))
+par(mar = c(0, 4, 2, 0))
+for (set in 1:nSets)
+{
+  plot(sampleTrees[[set]], main = paste("Sample clustering on all genes in", setLabels[set]), xlab="", sub="", cex = 0.7); abline(h=cutHeights[set], col = "red");
+} 
+dev.off();
+
+for (set in 1:nSets)
+{
+  # Find clusters cut by the line
+  labels = cutreeStatic(sampleTrees[[set]], cutHeight = cutHeights[set], minSize = 10)
+  # Keep the largest one (labeled by the number 1)
+  keep = (labels==1)
+  multiExpr[[set]]$data = multiExpr[[set]]$data[keep, ]
+}
+collectGarbage();
+# Check the size of the leftover data
+exprSize = checkSets(multiExpr)
+exprSize
+
+
+##########add Traits data
+traitData = read.csv("trait_new.csv"); 
+dim(traitData)
+names(traitData)
+
+# remove columns that hold information we do not need.
+#allTraits <-traitData[traitData$Group=="WB",]
+allTraits = traitData[, -c(2,3,4,5,6,7,8)];
+dim(allTraits)
+names(allTraits)
+allTraits$SID
+
+# Form a multi-set structure that will hold the clinical traits. 
+Traits = vector(mode="list", length = nSets);
+for (set in 1:nSets)
+{
+setSamples = rownames(multiExpr[[set]]$data);
+traitRows = match(setSamples, allTraits$SID); 
+Traits[[set]] = list(data = allTraits[traitRows, -1]); 
+rownames(Traits[[set]]$data) = allTraits[traitRows, 1];
+}
+collectGarbage();
+# Define data set dimensions
+nGenes = exprSize$nGenes;
+nGenes
+nSamples = exprSize$nSamples;
+nSamples
+
+save(multiExpr, Traits, nGenes, nSamples, setLabels, shortLabels, exprSize, file = "ConsensusdataInput.RData");
+
+##########Choose a set of soft-thresholding powers
+# Choose a set of soft-thresholding powers
+powers = c(seq(4,10,by=1), seq(12,30, by=2));
+
+# Initialize a list to hold the results of scale-free analysis
+powerTables = vector(mode = "list", length = nSets);
+
+# Call the network topology analysis function for each set in turn
+for (set in 1:nSets)
+powerTables[[set]] = list(data = pickSoftThreshold(multiExpr[[set]]$data, powerVector=powers,verbose = 2)[[2]]);
+collectGarbage();
+
+# Plot the results:
+colors = c("black", "green")
+# Will plot these columns of the returned scale free analysis tables
+plotCols = c(2,5,6,7)
+colNames = c("Scale Free Topology Model Fit", "Mean connectivity", "Median connectivity", "Max connectivity");
+
+# Get the minima and maxima of the plotted points
+ylim = matrix(NA, nrow = 2, ncol = 4);
+for (set in 1:nSets)
+{
+  for (col in 1:length(plotCols))
+  {
+  ylim[1, col] = min(ylim[1, col], powerTables[[set]]$data[, plotCols[col]], na.rm = TRUE); 
+  ylim[2, col] = max(ylim[2, col], powerTables[[set]]$data[, plotCols[col]], na.rm = TRUE);
+  } 
+}
+
+# Plot the quantities in the chosen columns vs. the soft thresholding power
+sizeGrWindow(8, 6)
+pdf(file = "Plots/scaleFreeAnalysis.pdf", wi = 8, he = 6);
+par(mfcol = c(2,2));
+par(mar = c(4.2, 4.2 , 2.2, 0.5));
+cex1 = 0.8;
+for (col in 1:length(plotCols)) for (set in 1:nSets)
+{
+  if (set==1) 
+  {
+  plot(powerTables[[set]]$data[,1], -sign(powerTables[[set]]$data[,3])*powerTables[[set]]$data[,2], xlab="Soft Threshold (power)",ylab=colNames[col],type="n", ylim = ylim[, col], main = colNames[col]);
+  addGrid(); 
+  }
+  if (col==1) {
+  text(powerTables[[set]]$data[,1], -sign(powerTables[[set]]$data[,3])*powerTables[[set]]$data[,2], labels=powers,cex=cex1,col=colors[set]);
+  } else
+    text(powerTables[[set]]$data[,1], powerTables[[set]]$data[,plotCols[col]], labels=powers,cex=cex1,col=colors[set]);
+  if (col==1)
+  {
+    legend("bottomright", legend = setLabels, col = colors, pch = 20);
+  } else
+    legend("topright", legend = setLabels, col = colors, pch = 20);
+} 
+dev.off();
+
+#If the lack of scale-free topology fit turns out to be caused by an interesting biological variable that one does not want to remove (i.e., adjust the data for), the appropriate soft-thresholding power can be chosen based on the number of samples as in the table below. This table has been updated in December 2017 to make the resulting networks conservative.
+#https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA_WB/faq.html
+
+
+powers<-c(10,9,12) #cut-off=0.85
+
+##########produce network
+
+#Robust correlation. The default correlation method in all functions in WGCNA is standard Pearson correlation. In general, unless there is good reason to believe that there are no outlier measurements, we recommend (and use ourselves) the biweight mid-correlation as a robust alternative. 
+
+net = blockwiseConsensusModules(multiExpr,
+                       power = powers,
+                       networkType ="signed hybrid", #in general we prefer signed (or "signed hybrid") networks
+                       corType = "bicor",
+                       maxPOutliers = 0.05, #also can try 0.1
+                       minModuleSize=30, 
+                       maxBlockSize=100000, 
+                       saveTOMS=TRUE, 
+                       saveTOMFileBase = "test", 
+                       deepSplit=4, 
+                       numericLabels=TRUE)
+
+names(net)
+table(net$colors) #To see how many modules were identified and what the module sizes are.
+
+##########################################plot
+
+consMEs = net$multiMEs;
+moduleLabels = net$colors;
+# Convert the numeric labels to color labels
+moduleColors = labels2colors(moduleLabels)
+consTree = net$dendrograms[[1]];
+sizeGrWindow(8,6);
+pdf(file = "Plots/ConsensusDendrogram-auto.pdf", wi = 8, he = 6) 
+plotDendroAndColors(consTree, moduleColors,"Module colors",dendroLabels = FALSE, hang = 0.03,addGuide = TRUE, guideHang = 0.05,
+main = "Consensus gene dendrogram and module colors")
+dev.off()
+save(consMEs, moduleLabels, moduleColors, consTree, file = "Consensus-NetworkConstruction-auto.RData")
+
+
+################################################
+
+# Set up variables to contain the module-trait correlations
+moduleTraitCor = list();
+moduleTraitPvalue = list();
+# Calculate the correlations
+for (set in 1:nSets)
+{
+  moduleTraitCor[[set]] = cor(consMEs[[set]]$data, Traits[[set]]$data, use = "p");
+  moduleTraitPvalue[[set]] = corPvalueFisher(moduleTraitCor[[set]], exprSize$nSamples[set]);
+}
+
+
+################################################plot
+
+# Convert numerical lables to colors for labeling of modules in the plot
+MEColors = labels2colors(as.numeric(substring(names(consMEs[[1]]$data), 3))); 
+MEColorNames = paste("ME", MEColors, sep="");
+
+# Open a suitably sized window (the user should change the window size if necessary) sizeGrWindow(10,7)
+pdf(file = "Plots/ModuleTraitRelationships-Liver.pdf", wi = 5, he = 9);
+
+# Plot the module-trait relationship table for set number 1
+set = 1
+textMatrix = paste(signif(moduleTraitCor[[set]], 2), "\n(",signif(moduleTraitPvalue[[set]], 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor[[set]])
+par(mar = c(6, 8.8, 3, 2.2)); 
+labeledHeatmap(Matrix = moduleTraitCor[[set]],
+               xLabels = names(Traits[[set]]$data),
+               yLabels = MEColorNames,
+               ySymbols = MEColorNames,
+               colorLabels = FALSE,
+               colors = greenWhiteRed(50), 
+               textMatrix = textMatrix , 
+               setStdMargins = FALSE, 
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module--trait relationships in", setLabels[set]))
+dev.off();
+
+newMatrix<-as.data.frame(textMatrix)
+newMatrix[newMatrix == '\n'] <- ' 'newMatrix$label<-yLabels
+write.table(newMatrix,"Matrix-Liver.xls",sep="\t", row.names =FALSE)
+
+set = 2
+textMatrix = paste(signif(moduleTraitCor[[set]], 2), "\n(",signif(moduleTraitPvalue[[set]], 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor[[set]])
+pdf(file = "Plots/ModuleTraitRelationships-Lung.pdf", wi = 5, he = 9);
+par(mar = c(6, 8.8, 3, 2.2));
+labeledHeatmap(Matrix = moduleTraitCor[[set]],
+               xLabels = names(Traits[[set]]$data),
+               yLabels = MEColorNames, 
+               ySymbols = MEColorNames, 
+               colorLabels = FALSE,
+               colors = greenWhiteRed(50), 
+               textMatrix = textMatrix, 
+               setStdMargins = FALSE, 
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module--trait relationships in", setLabels[set]))
+dev.off();
+
+newMatrix<-as.data.frame(textMatrix)
+newMatrix[newMatrix == '\n'] <- ' 'newMatrix$label<-yLabels
+write.table(newMatrix,"Matrix-Lung.xls",sep="\t", row.names =FALSE)
+
+set = 3
+textMatrix = paste(signif(moduleTraitCor[[set]], 2), "\n(",signif(moduleTraitPvalue[[set]], 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor[[set]])
+pdf(file = "Plots/ModuleTraitRelationships-spleen.pdf", wi = 5, he = 9);
+par(mar = c(6, 8.8, 3, 2.2));
+labeledHeatmap(Matrix = moduleTraitCor[[set]],
+               xLabels = names(Traits[[set]]$data),
+               yLabels = MEColorNames, 
+               ySymbols = MEColorNames, 
+               colorLabels = FALSE,
+               colors = greenWhiteRed(50), 
+               textMatrix = textMatrix, 
+               setStdMargins = FALSE, 
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module--trait relationships in", setLabels[set]))
+dev.off();
+
+newMatrix<-as.data.frame(textMatrix)
+newMatrix[newMatrix == '\n'] <- ' 'newMatrix$label<-yLabels
+write.table(newMatrix,"Matrix-spleen.xls",sep="\t", row.names =FALSE)
+
+
+#########################################TopHubInEachModule
+
+chooseTopHubInEachModule(multiExpr[[1]]$data, moduleColors, omitColors = "grey", power = 10, type = "signed")
+
+chooseTopHubInEachModule(multiExpr[[2]]$data, moduleColors, omitColors = "grey", power = 9, type = "signed")
+
+chooseTopHubInEachModule(multiExpr[[3]]$data, moduleColors, omitColors = "grey", power = 12, type = "signed")
+

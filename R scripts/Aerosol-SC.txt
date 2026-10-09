@@ -1,0 +1,85 @@
+library("edgeR") 
+
+laneInfo_my<-read.csv("trait_terminal.csv")
+counts = readDGE(laneInfo_my$SID)$counts
+
+cpms = cpm(counts) 
+keep = rowSums(cpms>1) >= 9 # at least 1 read in 9 samples
+counts = counts[keep,]
+summary(keep)
+
+#TMM normalization for compositional difference between the libraries.
+cds <- calcNormFactors(cds)
+cds$samples
+
+#design matrix
+sex<-factor(laneInfo_my$Sex, levels=c("F","M"))
+tissue<-factor(laneInfo_my$Tissue, levels=c("Liver","Spleen","Lung"))
+Route<-factor(laneInfo_my$Route, levels=c("control","Aerosol","SC"))
+
+data.frame(sex, tissue, Route)
+
+design <- model.matrix(~sex+ tissue + tissue:Route)
+colnames(design)
+
+#estimating the dispersions
+cds <- estimateDisp(cds, design)
+
+#To perform quasi-likelihood F-tests:
+fit <- glmQLFit(cds,design)
+
+#########in each
+qlf1 <- glmQLFTest(fit, contrast=c(0,0,0,0,1,0,0,-1,0,0))
+topTags(qlf1)
+top1 <- topTags(qlf1, n=nrow(cds$counts))$table
+top1$group<-"Liver_Aerosol-SC";
+head(top1)
+
+qlf2 <- glmQLFTest(fit, contrast=c(0,0,0,0,0,1,0,0,-1,0))
+topTags(qlf2)
+top2 <- topTags(qlf2, n=nrow(cds$counts))$table
+top2$group<-"Spleen_Aerosol-SC";
+head(top2)
+
+qlf3 <- glmQLFTest(fit, contrast=c(0,0,0,0,0,0,1,0,0,-1))
+topTags(qlf3)
+top3 <- topTags(qlf3, n=nrow(cds$counts))$table
+top3$group<-"Lung_Aerosol-SC";
+head(top3)
+
+top1$ensembl_gene_id <- rownames(top1)
+top1<-top1[top1$FDR<0.05,]
+top1<-top1[top1$logFC>1|top1$logFC< -1,]
+top1up<-top1[top1$logFC>1,]
+head(top1up)
+top1down<-top1[top1$logFC< -1,]
+head(top1down)
+
+top2$ensembl_gene_id <- rownames(top2)
+top2<-top2[top2$FDR<0.05,]
+top2<-top2[top2$logFC>1|top2$logFC< -1,]
+top2up<-top2[top2$logFC>1,]
+head(top2up)
+top2down<-top2[top2$logFC< -1,]
+head(top2down)
+
+top3$ensembl_gene_id <- rownames(top3)
+top3<-top3[top3$FDR<0.05,]
+top3<-top3[top3$logFC>1|top3$logFC< -1,]
+top3up<-top3[top3$logFC>1,]
+head(top3up)
+top3down<-top3[top3$logFC< -1,]
+head(top3down)
+
+totaltop <- rbind(top1, top2, top3)
+totaltop$condition[totaltop$logFC < -1] <- "Down"
+totaltop$condition[totaltop$logFC > 1] <- "Up"
+
+library(AnnotationDbi)
+Marmoset <- loadDb("org.Marmoset.sqlite")
+
+library("clusterProfiler")
+
+formula_BP <- compareCluster(ensembl_gene_id~condition+group, data=totaltop, fun="enrichGO", keyType='ENSEMBL', qvalueCutoff = 0.05, OrgDb = Marmoset, ont = "BP", readable = TRUE)
+
+dotplot(formula_BP, x="condition", color = "qvalue", label_format=100) + ggplot2::facet_grid(~group)
